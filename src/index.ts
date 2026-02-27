@@ -57,7 +57,7 @@ function handleTwilioConnection(twilioWs: WebSocket) {
   const isGeminiLiveProvider = process.env.AI_PROVIDER === 'gemini-live';
   let geminiLive: GeminiLiveProvider | null = null;
 
-  twilioWs.on('message', (data: string) => {
+  twilioWs.on('message', async (data: string) => {
     const message = JSON.parse(data);
 
     switch (message.event) {
@@ -67,36 +67,68 @@ function handleTwilioConnection(twilioWs: WebSocket) {
 
       case 'start':
         streamSid = message.start.streamSid;
+        const callSid = message.start.callSid;
         console.log('🎙️ Call started - StreamSid:', streamSid);
 
-				// --- ElevenLabs Path ---
-				if (isElevenlabsProvider) {
-					// Connect to ElevenLabs
-					elevenLabsWs = connectToElevenLabs(
-						process.env.ELEVENLABS_AGENT_ID!,
-						process.env.ELEVENLABS_API_KEY!
-					);
+        // PREPARE DATABASE SESSION ---
+        if (pool && streamSid) {
+          try {
+            await pool.query(
+              `INSERT INTO calls (call_sid, status) VALUES ($1, 'in-progress') ON CONFLICT (call_sid) DO NOTHING`,
+              [streamSid]
+            );
 
-					// Set up bidirectional audio bridge
-					setupElevenLabsHandlers(elevenLabsWs, twilioWs, streamSid!);
-				}
-				// --- Gemini Live Path ---
-				else if (isGeminiLiveProvider) {
-					geminiLive = new GeminiLiveProvider();
-					geminiLive.connect();
+            await pool.query(
+              `INSERT INTO call_sessions (stream_sid, current_state)
+               VALUES ($1, 'START')
+               ON CONFLICT (stream_sid) DO NOTHING`,
+              [streamSid]
+            );
+            console.log(`📡 Session initialized in DB for ${streamSid}`);
+          } catch (dbErr) {
+            console.error("❌ Failed to initialize session in DB:", dbErr);
+          }
+        }
 
-					// Listen for Gemini's processed audio and send to Twilio
-					geminiLive.onAudio((twilioPayload: string) => {
-						if (twilioWs.readyState === WebSocket.OPEN) {
-							twilioWs.send(JSON.stringify({
-								event: 'media',
-								streamSid: streamSid,
-								media: { payload: twilioPayload }
-							}));
-						}
-					});
-				}
-				break;
+        // --- ElevenLabs Path ---
+        if (isElevenlabsProvider) {
+          // Connect to ElevenLabs
+          elevenLabsWs = connectToElevenLabs(
+            process.env.ELEVENLABS_AGENT_ID!,
+            process.env.ELEVENLABS_API_KEY!
+          );
+
+          // Set up bidirectional audio bridge
+          setupElevenLabsHandlers(elevenLabsWs, twilioWs, streamSid!);
+        }
+        // --- Gemini Live Path ---
+        else if (isGeminiLiveProvider) {
+          geminiLive = new GeminiLiveProvider(streamSid!);
+          geminiLive.connect();
+
+          // Listen for Gemini's processed audio and send to Twilio
+          geminiLive.onAudio((twilioPayload: string) => {
+            if (twilioWs.readyState === WebSocket.OPEN) {
+              twilioWs.send(JSON.stringify({
+                event: 'media',
+                streamSid: streamSid,
+                media: { payload: twilioPayload }
+              }));
+            }
+          });
+
+          // The interruption signal from Gemini
+          geminiLive.onInterrupted(() => {
+            if (twilioWs.readyState === WebSocket.OPEN && streamSid) {
+              console.log('🚮 Clearing Twilio buffer due to Gemini interruption');
+              twilioWs.send(JSON.stringify({
+                event: 'clear',
+                streamSid: streamSid
+              }));
+            }
+          });
+        }
+        break;
 
       case 'media':
         // Forward caller's audio to ElevenLabs
@@ -165,7 +197,7 @@ async function makeCall(to: string): Promise<void> {
     }
 
   } catch (error) {
-    console.error("Error making call:", error);
+    console.error("❌ Error making call:", error);
   }
 }
 

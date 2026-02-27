@@ -32,8 +32,8 @@ export function twilioToGemini(base64Mulaw: string): string {
   return Buffer.from(pcm16k.buffer, pcm16k.byteOffset, pcm16k.byteLength).toString("base64");
 }
 
-export function geminiToTwilio(base64PCM16k: string): string {
-  const buffer = Buffer.from(base64PCM16k, "base64");
+export function geminiToTwilio(base64PCM24k: string): string {
+  const buffer = Buffer.from(base64PCM24k, "base64");
   // Convert Buffer to Int16Array (2 bytes per sample)
   const pcm24k = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.length / 2);
   // const pcm16k = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 2);
